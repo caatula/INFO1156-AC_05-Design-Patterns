@@ -9,14 +9,12 @@ import {
     Post,
     Query,
 } from "@nestjs/common";
-import { CommentEntity } from "@/posts/entities/comment.entity";
-import { LikeEntity } from "@/posts/entities/like.entity";
-// SE ELIMINÓ PostEntity PARA PASAR EL CHECK DE ESLINT
-import { legacyModerationApi } from "@/posts/legacy-moderation.client";
-import { PrismaService } from "@/prisma/prisma.service";
-
 import { PostsService } from "@/posts/posts.service";
 import { FeedService } from "@/posts/feed.service";
+import { ModerationService } from "@/posts/moderation/moderation.service";
+import { DomainEventsService } from "@/posts/events/domain-events.service";
+import { PrismaService } from "@/prisma/prisma.service";
+import { EntityFactory } from "@/posts/entities/entity.factory";
 import {
     AddLikeDto,
     CreateCommentDto,
@@ -29,12 +27,14 @@ export class PostsController {
     constructor(
         private readonly postsService: PostsService,
         private readonly feedService: FeedService,
+        private readonly moderationService: ModerationService,
+        private readonly domainEvents: DomainEventsService,
         private readonly prisma: PrismaService,
     ) {}
 
     @Post()
     async create(@Body() body: CreatePostDto) {
-        // Validación básica (Clean Code: Fail Fast)
+        // Validación básica: Fail Fast
         if (body.title.length < 3 || body.title.length > 120) {
             throw new BadRequestException("Title length must be between 3 and 120");
         }
@@ -45,8 +45,11 @@ export class PostsController {
 
         const created = await this.postsService.create(body);
 
-        // Notificaciones y eventos (Idealmente esto iría en un Interceptor o EventBus)
-        console.log(`[event:post.created]`, { postId: created.id, title: created.title });
+        // Emisión de evento de dominio para creación de post
+        this.domainEvents.emit("post.created", { 
+            postId: created.id, 
+            title: created.title 
+        });
         
         return {
             ok: true,
@@ -65,7 +68,7 @@ export class PostsController {
 
     @Get("feed")
     async getFeed(@Query() query: FeedQueryDto) {
-        // Implementación del patrón Strategy a través del FeedService
+        // Implementación de estrategia de feed
         const mode = query.mode || "latest";
         return this.feedService.getFeed(mode);
     }
@@ -82,14 +85,9 @@ export class PostsController {
             orderBy: { createdAt: "desc" },
         });
 
-        // Mapeo a Entity (Siguiendo SRP)
-        const entities = comments.map(
-            (c) => new CommentEntity(
-                c.id, c.postId, c.content, c.createdAt, c.updatedAt, 
-                c.source, "approved", c.content.length > 80 ? 70 : 45, 
-                c.content.length % 2 === 0, "es", 
-                { chars: c.content.length, source: c.source }
-            ),
+        // Mapeo centralizado usando la Factory
+        const entities = comments.map((c) => 
+            EntityFactory.createCommentEntity(c, { pass: true })
         );
 
         return {
@@ -104,30 +102,38 @@ export class PostsController {
         @Body() body: CreateCommentDto,
     ) {
         const post = await this.postsService.findById(id);
-        if (!post) throw new NotFoundException("Post not found");
+        if (!post) {
+            throw new NotFoundException("Post not found");
+        }
 
-        if (body.content.length < 2) throw new BadRequestException("Comment too short");
+        if (body.content.length < 2) {
+            throw new BadRequestException("Comment too short");
+        }
 
-        // Lógica de Moderación (Sugerencia: Mover a un Adapter)
-        const moderation = legacyModerationApi.review(body.content);
-        let blocked = this.checkIfBlocked(moderation);
+        // Cambio de lógica legada por servicio de moderación inyectado
+        // Se asume llamada asíncrona por ser un servicio externo de revisión
+        const moderation = await this.moderationService.review(body.content);
 
-        if (blocked) {
+        if (!moderation.pass) {
             throw new BadRequestException("Comment blocked by moderation");
         }
 
-        const created = await this.prisma.comment.create({
-            data: { postId: id, content: body.content, source: "controller" },
+        // Delegación de persistencia al Service en lugar de Prisma directo[cite: 1]
+        const created = await this.postsService.createComment(id, body, "controller");
+        
+        // Uso de Factory para desacoplar la creación de la entidad[cite: 1]
+        const entity = EntityFactory.createCommentEntity(created, moderation);
+
+        // Notificación mediante eventos de dominio
+        this.domainEvents.emit("comment.created", {
+            postId: id,
+            commentId: created.id,
         });
 
-        const entity = new CommentEntity(
-            created.id, created.postId, created.content, created.createdAt, 
-            created.updatedAt, created.source, "approved", 
-            created.content.length > 60 ? 80 : 40, false, "es", 
-            { moderation, source: "legacy" }
-        );
-
-        return { message: "comment_created", entity };
+        return {
+            message: "comment_created",
+            entity,
+        };
     }
 
     @Post(":id/likes")
@@ -136,32 +142,26 @@ export class PostsController {
         @Body() body: AddLikeDto,
     ) {
         const post = await this.postsService.findById(id);
-        if (!post) throw new NotFoundException("Post not found");
+        if (!post) {
+            throw new NotFoundException("Post not found");
+        }
 
         const reactionType = body.reactionType || "like";
         const weight = body.weight || 1;
 
-        if (weight < 1) throw new BadRequestException("Weight must be at least 1");
+        if (weight < 1) {
+            throw new BadRequestException("Weight must be at least 1");
+        }
 
         const like = await this.prisma.like.create({
             data: { postId: id, reactionType, weight, source: "controller" },
         });
 
-        const entity = new LikeEntity(
-            like.id, like.postId, like.reactionType, like.weight, 
-            like.source, like.createdAt, like.weight > 2 ? "strong" : "normal", 
-            true, { from: "manual", r: like.reactionType }
-        );
+        const entity = EntityFactory.createLikeEntity(like);
 
-        return { success: true, like: entity };
-    }
-
-    // Método privado para limpiar la lógica de moderación (Refactorización Clean Code)
-    private checkIfBlocked(moderation: any): boolean {
-        if (moderation === "BLOCK") return true;
-        if (typeof moderation === "number") return moderation < 1;
-        if (typeof moderation === "object") return !("pass" in moderation && moderation.pass);
-        if (moderation === "OK") return false;
-        return false;
+        return { 
+            success: true, 
+            like: entity 
+        };
     }
 }
