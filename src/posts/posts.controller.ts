@@ -14,7 +14,7 @@ import { FeedService } from "@/posts/feed.service";
 import { ModerationService } from "@/posts/moderation/moderation.service";
 import { DomainEventsService } from "@/posts/events/domain-events.service";
 import { PrismaService } from "@/prisma/prisma.service";
-import { EntityFactory } from "@/posts/entities/entity.factory";
+import { EntityFactory } from "@/posts/factories/entity.factory";
 import {
     AddLikeDto,
     CreateCommentDto,
