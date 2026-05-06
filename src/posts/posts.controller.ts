@@ -87,7 +87,7 @@ export class PostsController {
 
         // Mapeo centralizado usando la Factory
         const entities = comments.map((c) => 
-            EntityFactory.createCommentEntity(c, { pass: true })
+            EntityFactory.createCommentEntity(c, { pass: true, reason: "approved", raw: "OK" })
         );
 
         return {
