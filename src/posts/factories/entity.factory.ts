@@ -1,6 +1,7 @@
 import { PostEntity } from "@/posts/entities/post.entity"
 import { CommentEntity } from "@/posts/entities/comment.entity"
 import { LikeEntity } from "@/posts/entities/like.entity"
+import { ModerationResult } from "@/posts/moderation/legacy-moderation.adapter"
 
 /**
  * Interface para datos crudos de Post desde la BD
@@ -36,14 +37,6 @@ interface LikeData {
     reactionType: string
     weight: number
     createdAt: Date
-}
-
-/**
- * Interface para resultado de moderación
- */
-interface ModerationResult {
-    pass: boolean
-    reason?: string
 }
 
 /**
